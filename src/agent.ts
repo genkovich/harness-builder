@@ -1,6 +1,7 @@
 import type { JSONValue } from 'ai';
 import type { Agent } from './harness.ts';
 import { loadModel } from './model.ts';
+import { loadContext } from './context.ts';
 import { preToolUse, toolsFor } from './permissions.ts';
 import { noteTools, runNoteTool } from './tools/notes.ts';
 import { runSkillTool, skillCatalog, skillTools } from './tools/skills.ts';
@@ -22,7 +23,7 @@ export function createAgent(): Agent {
   return {
     model: loadModel(),
     system,
-    context: [skillCatalog()],
+    context: [...loadContext(), skillCatalog()],
     tools,
     // Шар 1: кожен чат отримує свій список тулів. deleteNotes бачить лише власник.
     toolsFor: chatId => toolsFor(tools, chatId),

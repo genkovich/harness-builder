@@ -76,10 +76,27 @@ export function renderSection(section: Section) {
   return `<${section.tag} source="${section.source}">\n${section.text.trim()}\n</${section.tag}>`;
 }
 
-// System = інструкції агента + файли проєкту + поточний час (стендапу треба знати, що таке «сьогодні»).
+// System = інструкції агента + файли проєкту. Між задачами він однаковий байт у байт,
+// тож разом зі списком тулів і історією чату це стабільний префікс, який провайдер бере з кешу.
 function systemOf(agent: Agent) {
-  const sections = (agent.context ?? []).map(renderSection);
-  return [agent.system, ...sections, `Current time: ${new Date().toISOString()}`].join('\n\n');
+  return [agent.system, ...(agent.context ?? []).map(renderSection)].join('\n\n');
+}
+
+// Час міняється щозапиту, тому стоїть у самому кінці, після всього стабільного.
+// У історію повідомлення йде саме таким, тож наступний запит почнеться з тих самих байтів.
+function userMessage(task: string): ModelMessage {
+  return { role: 'user', content: `${task}\n\n<now>${new Date().toISOString()}</now>` };
+}
+
+// Anthropic кешує лише до позначки cacheControl. Ставимо її на останнє повідомлення запиту
+// і не зберігаємо в історію: інакше позначки накопичувались би (Anthropic приймає до чотирьох).
+// OpenAI і Groq кешують префікс самі, без позначок.
+function markCache(messages: ModelMessage[]): ModelMessage[] {
+  const last = messages.at(-1);
+  if (!last) {
+    return messages;
+  }
+  return [...messages.slice(0, -1), { ...last, providerOptions: { anthropic: { cacheControl: { type: 'ephemeral' } } } }];
 }
 
 export async function runAgent(
@@ -97,7 +114,7 @@ export async function runAgent(
   const history = loadHistory(where.chatId);
   const kept = trimHistory(history);
   // Уся «памʼять» моделі = цей масив. Що в нього не поклали, того вона не бачить.
-  const messages: ModelMessage[] = [...kept.messages, { role: 'user', content: task }];
+  const messages: ModelMessage[] = [...kept.messages, userMessage(task)];
   let cost: number | null = agent.model.price ? 0 : null;
   let turn = 0;
 
@@ -113,6 +130,19 @@ export async function runAgent(
 
   trace('start', { task, model: agent.model.id, limits });
   trace('history', { loaded: history.length, kept: kept.messages.length, trimmed: kept.trimmed });
+  trace('context', {
+    system: { tokens: approxTokens(agent.system) },
+    tools: Object.entries(tools).map(([name, tool]) => ({
+      name,
+      tokens: approxTokens(name + (tool.description ?? '')),
+    })),
+    sections: (agent.context ?? []).map(section => ({
+      tag: section.tag,
+      source: section.source,
+      tokens: approxTokens(section.text),
+    })),
+    history: { messages: kept.messages.length, tokens: approxTokens(JSON.stringify(kept.messages)) },
+  });
 
   try {
     while (turn < limits.maxTurns) {
@@ -189,7 +219,7 @@ async function callModel(
       return await generateText({
         model: model.model,
         system,
-        messages,
+        messages: markCache(messages),
         tools,
         maxOutputTokens: limits.maxOutputTokens,
         // Повтори робимо самі, щоб їх було видно в trace.
