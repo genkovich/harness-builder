@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
+  APICallError,
   generateText,
   type JSONValue,
   type LanguageModelUsage,
@@ -15,6 +16,8 @@ export type Limits = {
   maxCostUsd: number; // бюджет однієї задачі
   maxToolChars: number; // довший результат тула обрізаємо, щоб не забити контекст
   maxOutputTokens: number; // Groq Free не приймає запит, де max_tokens > 1000
+  maxRetries: number;
+  maxRetryWaitMs: number;
 };
 
 export const defaultLimits: Limits = {
@@ -22,6 +25,8 @@ export const defaultLimits: Limits = {
   maxCostUsd: 0.05,
   maxToolChars: 6_000,
   maxOutputTokens: 1_000,
+  maxRetries: 2,
+  maxRetryWaitMs: 30_000,
 };
 
 export type Agent = {
@@ -33,7 +38,7 @@ export type Agent = {
   limits?: Partial<Limits>;
 };
 
-export type StopReason = 'final' | 'max_turns' | 'max_cost';
+export type StopReason = 'final' | 'max_turns' | 'max_cost' | 'truncated' | 'error';
 
 export type RunResult = {
   runId: string;
@@ -76,63 +81,120 @@ export async function runAgent(
 
   trace('start', { task, model: agent.model.id, limits });
 
-  while (turn < limits.maxTurns) {
-    turn++;
-    trace('request', {
-      turn,
-      system,
-      messages,
-      tools: Object.keys(tools),
-      approxTokens: approxTokens(system + JSON.stringify(messages)),
-    });
+  try {
+    while (turn < limits.maxTurns) {
+      turn++;
+      trace('request', {
+        turn,
+        system,
+        messages,
+        tools: Object.keys(tools),
+        approxTokens: approxTokens(system + JSON.stringify(messages)),
+      });
 
-    const reply = await generateText({
-      model: agent.model.model,
-      system,
-      messages,
-      tools,
-      maxOutputTokens: limits.maxOutputTokens,
-      abortSignal: AbortSignal.timeout(60_000),
-      // Зберегти сирий HTTP-запит, щоб показати його у веб-trace.
-      include: { requestBody: true },
-    });
-    const turnCost = costOf(agent.model, reply.usage);
-    if (cost !== null && turnCost !== null) {
-      cost += turnCost;
+      const reply = await callModel(agent.model, system, messages, tools, limits, trace, turn);
+      const turnCost = costOf(agent.model, reply.usage);
+      if (cost !== null && turnCost !== null) {
+        cost += turnCost;
+      }
+
+      trace('response', {
+        turn,
+        text: reply.text,
+        toolCalls: reply.toolCalls.map(call => ({ id: call.toolCallId, name: call.toolName, input: call.input })),
+        finishReason: reply.finishReason,
+        usage: usageOf(reply.usage),
+        costUsd: turnCost,
+        totalCostUsd: cost,
+        body: reply.request.body ?? null,
+      });
+
+      // Обрізана відповідь: аргументи тулів можуть бути неповні, тож нічого не виконуємо.
+      if (reply.finishReason === 'length') {
+        return stop('truncated', 'Відповідь моделі обрізано на maxOutputTokens. Тули з неї не виконую, спробуй коротшу задачу.');
+      }
+
+      messages.push(...reply.responseMessages.filter(message => message.role === 'assistant'));
+
+      // Немає запитів на тули: модель дала фінальну відповідь, виходимо з циклу.
+      if (reply.toolCalls.length === 0) {
+        return stop('final', reply.text.trim() || '(модель не повернула тексту)');
+      }
+
+      // На кожен tool call рівно один tool result з тим самим id, навіть коли тул упав.
+      for (const call of reply.toolCalls) {
+        const result = await executeTool(agent, call, run, trace, limits, turn);
+        messages.push(toolResult(call, result));
+      }
+
+      if (cost !== null && cost > limits.maxCostUsd) {
+        trace('limit', { kind: 'max_cost', value: limits.maxCostUsd, actual: cost });
+        return stop('max_cost', `Зупинився на бюджеті $${limits.maxCostUsd}. Задача може бути незавершена.`);
+      }
     }
 
-    trace('response', {
-      turn,
-      text: reply.text,
-      toolCalls: reply.toolCalls.map(call => ({ id: call.toolCallId, name: call.toolName, input: call.input })),
-      finishReason: reply.finishReason,
-      usage: usageOf(reply.usage),
-      costUsd: turnCost,
-      totalCostUsd: cost,
-      body: reply.request.body ?? null,
-    });
+    trace('limit', { kind: 'max_turns', value: limits.maxTurns });
+    return stop('max_turns', `Зупинився після ${limits.maxTurns} кроків. Задача може бути незавершена.`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    trace('error', { turn, message });
+    return stop('error', `Модель не відповіла: ${message}`);
+  }
+}
 
-    messages.push(...reply.responseMessages.filter(message => message.role === 'assistant'));
-
-    // Немає запитів на тули: модель дала фінальну відповідь, виходимо з циклу.
-    if (reply.toolCalls.length === 0) {
-      return stop('final', reply.text.trim() || '(модель не повернула тексту)');
-    }
-
-    // На кожен tool call рівно один tool result з тим самим id.
-    for (const call of reply.toolCalls) {
-      const result = await executeTool(agent, call, run, trace, limits, turn);
-      messages.push(toolResult(call, result));
-    }
-
-    if (cost !== null && cost > limits.maxCostUsd) {
-      trace('limit', { kind: 'max_cost', value: limits.maxCostUsd, actual: cost });
-      return stop('max_cost', `Зупинився на бюджеті $${limits.maxCostUsd}. Задача може бути незавершена.`);
+async function callModel(
+  model: ModelInfo,
+  system: string,
+  messages: ModelMessage[],
+  tools: ToolSet,
+  limits: Limits,
+  trace: Trace,
+  turn: number,
+) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await generateText({
+        model: model.model,
+        system,
+        messages,
+        tools,
+        maxOutputTokens: limits.maxOutputTokens,
+        // Повтори робимо самі, щоб їх було видно в trace.
+        maxRetries: 0,
+        abortSignal: AbortSignal.timeout(60_000),
+        // Зберегти сирий HTTP-запит, щоб показати його у веб-trace.
+        include: { requestBody: true },
+      });
+    } catch (error) {
+      const wait = retryDelay(error, attempt, limits);
+      if (wait === null) {
+        throw error;
+      }
+      trace('retry', {
+        turn,
+        attempt: attempt + 1,
+        waitMs: wait,
+        status: APICallError.isInstance(error) ? error.statusCode : null,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      await new Promise(resolve => setTimeout(resolve, wait));
     }
   }
+}
 
-  trace('limit', { kind: 'max_turns', value: limits.maxTurns });
-  return stop('max_turns', `Зупинився після ${limits.maxTurns} кроків. Задача може бути незавершена.`);
+// Повторюємо лише те, що може пройти з другої спроби: 429 і 5xx.
+function retryDelay(error: unknown, attempt: number, limits: Limits): number | null {
+  if (attempt >= limits.maxRetries || !APICallError.isInstance(error)) {
+    return null;
+  }
+  const status = error.statusCode ?? 0;
+  // «Request too large» теж 429, але той самий запит не пройде і вдруге.
+  if (/too large/i.test(error.message) || (status !== 429 && status < 500)) {
+    return null;
+  }
+  const seconds = Number(error.responseHeaders?.['retry-after']);
+  const wait = Number.isFinite(seconds) && seconds >= 0 ? seconds * 1_000 : 1_000 * 2 ** attempt;
+  return Math.min(wait, limits.maxRetryWaitMs);
 }
 
 async function executeTool(
@@ -144,18 +206,24 @@ async function executeTool(
   turn: number,
 ): Promise<JSONValue> {
   const base = { turn, id: call.toolCallId, name: call.toolName };
-  // Аргументи не пройшли схему: виконавцю такий виклик не передаємо, модель отримує помилку.
-  if (call.invalid) {
-    const message = call.error instanceof Error ? call.error.message : String(call.error);
+  try {
+    // Аргументи не пройшли схему: виконавцю такий виклик не передаємо.
+    if (call.invalid) {
+      throw call.error;
+    }
+
+    trace('tool_start', { ...base, input: call.input });
+    // await потрібен, щоб catch перехопив і помилку асинхронної функції.
+    const output = await agent.runTool(call.toolName, call.input, run);
+    const clipped = clip(output, limits.maxToolChars);
+    trace('tool_result', { ...base, output: clipped.value, chars: clipped.chars, truncated: clipped.truncated });
+    return clipped.value;
+  } catch (error) {
+    // Помилка тула = дані для моделі. Вона прочитає й спробує інакше.
+    const message = error instanceof Error ? error.message : String(error);
     trace('tool_error', { ...base, error: message });
     return { error: message };
   }
-
-  trace('tool_start', { ...base, input: call.input });
-  const output = await agent.runTool(call.toolName, call.input, run);
-  const clipped = clip(output, limits.maxToolChars);
-  trace('tool_result', { ...base, output: clipped.value, chars: clipped.chars, truncated: clipped.truncated });
-  return clipped.value;
 }
 
 // Обрізаємо вміст результату, а не викидаємо повідомлення: пара виклик-результат лишається цілою.
