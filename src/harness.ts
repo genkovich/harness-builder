@@ -12,6 +12,9 @@ import { loadHistory, saveHistory, trimHistory } from './history.ts';
 import { costOf, type ModelInfo } from './model.ts';
 import { approxTokens, tracer, type RunInfo } from './trace.ts';
 
+// Шматок контексту з файла проєкту: тег, звідки взяли, текст.
+export type Section = { tag: string; source: string; text: string };
+
 export type Limits = {
   maxTurns: number; // скільки разів максимум питаємо модель за одну задачу
   maxCostUsd: number; // бюджет однієї задачі
@@ -33,6 +36,8 @@ export const defaultLimits: Limits = {
 export type Agent = {
   model: ModelInfo;
   system: string;
+  // Файли проєкту, які харнес додає до system: каталог skills, з етапу 10 ще й AGENTS.md.
+  context?: Section[];
   tools: ToolSet;
   // Виконання тулів живе в нашому коді. Модель лише просить, а run каже, хто питає.
   runTool: (name: string, input: unknown, run: RunInfo) => Promise<JSONValue>;
@@ -60,6 +65,16 @@ export function withDefaults(custom: Partial<Limits> = {}): Limits {
 
 type ToolCall = TypedToolCall<ToolSet>;
 
+export function renderSection(section: Section) {
+  return `<${section.tag} source="${section.source}">\n${section.text.trim()}\n</${section.tag}>`;
+}
+
+// System = інструкції агента + файли проєкту + поточний час (стендапу треба знати, що таке «сьогодні»).
+function systemOf(agent: Agent) {
+  const sections = (agent.context ?? []).map(renderSection);
+  return [agent.system, ...sections, `Current time: ${new Date().toISOString()}`].join('\n\n');
+}
+
 export async function runAgent(
   agent: Agent,
   task: string,
@@ -68,7 +83,7 @@ export async function runAgent(
   const run: RunInfo = { runId: randomUUID().slice(0, 8), ...where };
   const trace = tracer(run);
   const limits = withDefaults(agent.limits);
-  const system = agent.system;
+  const system = systemOf(agent);
   const tools = agent.tools;
   // Памʼять розмови: спершу минулі повідомлення цього чату, нове повідомлення в кінці.
   const history = loadHistory(where.chatId);

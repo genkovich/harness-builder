@@ -2,6 +2,7 @@ import type { JSONValue } from 'ai';
 import type { Agent } from './harness.ts';
 import { loadModel } from './model.ts';
 import { noteTools, runNoteTool } from './tools/notes.ts';
+import { runSkillTool, skillCatalog, skillTools } from './tools/skills.ts';
 
 // Інструкції моделі англійською, відповідь користувачу українською.
 const system = [
@@ -9,19 +10,21 @@ const system = [
   'Notes: use saveNote and searchNotes. Never claim a note is saved or found without a tool result.',
   'The current chat is chosen by code, not by you.',
   'Memory: earlier messages of this chat are your conversation history. Answer questions about what the user said before directly from them, without tools. Notes are only for what the user asks to save.',
+  'Skills: check <skills> first. If a description matches the task, call readSkill before any other tool.',
   'Errors: if a tool returns an error, read it and tell the user what failed, or try another way.',
   'Answer in Ukrainian, plain text.',
 ].join('\n');
 
-const tools = noteTools;
+const tools = { ...noteTools, ...skillTools };
 
 export function createAgent(): Agent {
   return {
     model: loadModel(),
     system,
+    context: [skillCatalog()],
     tools,
     async runTool(name, input, run) {
-      const output = runNoteTool(name, input, run.chatId);
+      const output = runSkillTool(name, input) ?? runNoteTool(name, input, run.chatId);
       if (output === undefined) {
         throw new Error(`Невідомий тул: ${name}`);
       }
