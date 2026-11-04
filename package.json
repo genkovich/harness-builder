@@ -1,0 +1,36 @@
+{
+  "name": "harness-builder",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^22.19.0 || >=24.11.0"
+  },
+  "scripts": {
+    "web": "tsx --env-file-if-exists=.env src/main.ts web",
+    "cli": "tsx --env-file-if-exists=.env src/main.ts cli",
+    "doctor": "tsx --env-file-if-exists=.env scripts/doctor.ts",
+    "step": "node scripts/step.mjs",
+    "test": "node scripts/test.mjs",
+    "check": "tsc --noEmit",
+    "prepare": "node -e \"const fs=require('node:fs'); if (!fs.existsSync('.env')) fs.copyFileSync('.env.example', '.env')\""
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "4.0.96",
+    "@ai-sdk/groq": "4.0.76",
+    "@ai-sdk/openai": "4.0.108",
+    "@ai-sdk/openai-compatible": "3.0.84",
+    "ai": "7.0.162",
+    "grammy": "1.46.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "fsevents@2.3.3": true
+  }
+}

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Візуальний харнес</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Ліва колонка: чат -->
+    <aside class="chat" aria-label="Чат">
+      <header class="chat-head">
+        <div class="brand">
+          <span class="brand-dot" aria-hidden="true"></span>
+          <h1>Візуальний харнес</h1>
+          <span id="conn" class="conn" title="Звʼязок із сервером">звʼязок…</span>
+        </div>
+        <dl class="info">
+          <div><dt>модель</dt><dd id="info-model" class="mono">…</dd></div>
+          <div><dt>Telegram</dt><dd id="info-telegram">…</dd></div>
+          <div><dt>власник</dt><dd id="info-owner">…</dd></div>
+        </dl>
+      </header>
+
+      <div id="messages" class="messages" aria-live="polite"></div>
+
+      <form id="composer" class="composer" autocomplete="off">
+        <label class="chatid">
+          <span>chat id</span>
+          <input id="chat-id" class="mono" value="web" spellcheck="false" aria-label="chat id">
+        </label>
+        <div class="send-row">
+          <textarea id="text" rows="2" placeholder="Задача для агента (Enter)" title="Enter - надіслати, Shift+Enter - новий рядок"></textarea>
+          <button id="send" type="submit">Надіслати</button>
+        </div>
+      </form>
+    </aside>
+
+    <!-- Права колонка: trace вибраного запуску -->
+    <main class="trace" aria-label="Trace запуску">
+      <header class="trace-head">
+        <div class="picker">
+          <button id="run-btn" class="run-btn" type="button" aria-haspopup="listbox" aria-expanded="false">
+            <span class="run-btn-label" id="run-btn-label">Запусків ще немає</span>
+            <span class="caret" aria-hidden="true">▾</span>
+          </button>
+          <button id="follow" class="follow on" type="button" title="Автоматично показувати найновіший запуск">стежу за останнім</button>
+          <div id="run-list" class="run-list" role="listbox" hidden></div>
+        </div>
+        <div id="counters" class="counters"></div>
+      </header>
+
+      <div class="trace-body">
+        <section id="timeline" class="timeline" aria-label="Кроки циклу"></section>
+        <aside id="context" class="context" aria-label="Контекст"></aside>
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
