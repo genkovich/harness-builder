@@ -119,6 +119,13 @@ async function executeTool(
   turn: number,
 ): Promise<JSONValue> {
   const base = { turn, id: call.toolCallId, name: call.toolName };
+  // Аргументи не пройшли схему: виконавцю такий виклик не передаємо, модель отримує помилку.
+  if (call.invalid) {
+    const message = call.error instanceof Error ? call.error.message : String(call.error);
+    trace('tool_error', { ...base, error: message });
+    return { error: message };
+  }
+
   trace('tool_start', { ...base, input: call.input });
   const output = await agent.runTool(call.toolName, call.input, run);
   trace('tool_result', { ...base, output, chars: JSON.stringify(output)?.length ?? 0 });

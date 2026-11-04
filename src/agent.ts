@@ -6,7 +6,7 @@ import { noteTools, runNoteTool } from './tools/notes.ts';
 // Інструкції моделі англійською, відповідь користувачу українською.
 const system = [
   'Role: a personal notes assistant in Telegram. The user saves notes and asks about them.',
-  'Notes: call saveNote when the user asks to remember something. Never claim a note is saved without a tool result.',
+  'Notes: use saveNote and searchNotes. Never claim a note is saved or found without a tool result.',
   'The current chat is chosen by code, not by you.',
   'Answer in Ukrainian, plain text.',
 ].join('\n');
