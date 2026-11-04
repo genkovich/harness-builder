@@ -10,9 +10,19 @@ import {
 import { costOf, type ModelInfo } from './model.ts';
 import { approxTokens, tracer, type RunInfo } from './trace.ts';
 
-// Запобіжник від нескінченного циклу і стеля відповіді (Groq Free не приймає max_tokens > 1000).
-// Ліміти з .env і бюджет задачі зробимо на етапі 04.
-const limits = { maxTurns: 10, maxOutputTokens: 1_000 };
+export type Limits = {
+  maxTurns: number; // скільки разів максимум питаємо модель за одну задачу
+  maxCostUsd: number; // бюджет однієї задачі
+  maxToolChars: number; // довший результат тула обрізаємо, щоб не забити контекст
+  maxOutputTokens: number; // Groq Free не приймає запит, де max_tokens > 1000
+};
+
+export const defaultLimits: Limits = {
+  maxTurns: 8,
+  maxCostUsd: 0.05,
+  maxToolChars: 6_000,
+  maxOutputTokens: 1_000,
+};
 
 export type Agent = {
   model: ModelInfo;
@@ -20,9 +30,10 @@ export type Agent = {
   tools: ToolSet;
   // Виконання тулів живе в нашому коді. Модель лише просить, а run каже, хто питає.
   runTool: (name: string, input: unknown, run: RunInfo) => Promise<JSONValue>;
+  limits?: Partial<Limits>;
 };
 
-export type StopReason = 'final' | 'max_turns';
+export type StopReason = 'final' | 'max_turns' | 'max_cost';
 
 export type RunResult = {
   runId: string;
@@ -35,6 +46,12 @@ export type RunResult = {
 
 type Trace = ReturnType<typeof tracer>;
 
+// Порожні значення з .env не перебивають типові ліміти.
+export function withDefaults(custom: Partial<Limits> = {}): Limits {
+  const set = Object.entries(custom).filter(([, value]) => value !== undefined);
+  return { ...defaultLimits, ...Object.fromEntries(set) };
+}
+
 type ToolCall = TypedToolCall<ToolSet>;
 
 export async function runAgent(
@@ -44,6 +61,7 @@ export async function runAgent(
 ): Promise<RunResult> {
   const run: RunInfo = { runId: randomUUID().slice(0, 8), ...where };
   const trace = tracer(run);
+  const limits = withDefaults(agent.limits);
   const system = agent.system;
   const tools = agent.tools;
   // Уся «памʼять» моделі = цей масив. Що в нього не поклали, того вона не бачить.
@@ -56,7 +74,7 @@ export async function runAgent(
     return { runId: run.runId, reason, text, turns: turn, costUsd: cost, messages };
   };
 
-  trace('start', { task, model: agent.model.id });
+  trace('start', { task, model: agent.model.id, limits });
 
   while (turn < limits.maxTurns) {
     turn++;
@@ -103,11 +121,17 @@ export async function runAgent(
 
     // На кожен tool call рівно один tool result з тим самим id.
     for (const call of reply.toolCalls) {
-      const result = await executeTool(agent, call, run, trace, turn);
+      const result = await executeTool(agent, call, run, trace, limits, turn);
       messages.push(toolResult(call, result));
+    }
+
+    if (cost !== null && cost > limits.maxCostUsd) {
+      trace('limit', { kind: 'max_cost', value: limits.maxCostUsd, actual: cost });
+      return stop('max_cost', `Зупинився на бюджеті $${limits.maxCostUsd}. Задача може бути незавершена.`);
     }
   }
 
+  trace('limit', { kind: 'max_turns', value: limits.maxTurns });
   return stop('max_turns', `Зупинився після ${limits.maxTurns} кроків. Задача може бути незавершена.`);
 }
 
@@ -116,6 +140,7 @@ async function executeTool(
   call: ToolCall,
   run: RunInfo,
   trace: Trace,
+  limits: Limits,
   turn: number,
 ): Promise<JSONValue> {
   const base = { turn, id: call.toolCallId, name: call.toolName };
@@ -128,8 +153,26 @@ async function executeTool(
 
   trace('tool_start', { ...base, input: call.input });
   const output = await agent.runTool(call.toolName, call.input, run);
-  trace('tool_result', { ...base, output, chars: JSON.stringify(output)?.length ?? 0 });
-  return output;
+  const clipped = clip(output, limits.maxToolChars);
+  trace('tool_result', { ...base, output: clipped.value, chars: clipped.chars, truncated: clipped.truncated });
+  return clipped.value;
+}
+
+// Обрізаємо вміст результату, а не викидаємо повідомлення: пара виклик-результат лишається цілою.
+function clip(output: JSONValue, maxChars: number) {
+  const json = JSON.stringify(output) ?? 'null';
+  if (json.length <= maxChars) {
+    return { value: output, chars: json.length, truncated: false };
+  }
+  return {
+    value: {
+      truncated: true,
+      preview: json.slice(0, maxChars),
+      note: `Результат обрізано: ${maxChars} з ${json.length} символів. Звузь запит, щоб отримати решту.`,
+    },
+    chars: json.length,
+    truncated: true,
+  };
 }
 
 // null = провайдер цього числа не повідомив. Це не те саме, що нуль.

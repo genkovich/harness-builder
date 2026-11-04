@@ -25,5 +25,9 @@ export function createAgent(): Agent {
       }
       return output as JSONValue;
     },
+    limits: {
+      maxTurns: Number(process.env.MAX_TURNS) || undefined,
+      maxCostUsd: Number(process.env.MAX_COST_USD) || undefined,
+    },
   };
 }
