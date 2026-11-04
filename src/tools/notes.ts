@@ -38,6 +38,13 @@ export function searchNotes(chatId: string, query = '') {
   return readNotes().filter(note => note.chatId === chatId && note.text.toLowerCase().includes(search));
 }
 
+export function deleteNotes(chatId: string) {
+  const notes = readNotes();
+  const remaining = notes.filter(note => note.chatId !== chatId);
+  writeNotes(remaining);
+  return { deleted: notes.length - remaining.length };
+}
+
 // Схема = контракт тула. SDK перевіряє аргументи моделі ще до нашого коду.
 const noteInput = z.object({ text: z.string().trim().min(1).max(maxNoteCharacters) });
 const searchInput = z.object({ query: z.string().max(200).default('') });
@@ -52,6 +59,10 @@ export const noteTools = {
     description: "Find the user's saved notes that contain the query. An empty query returns all notes with their dates.",
     inputSchema: searchInput,
   }),
+  deleteNotes: tool({
+    description: "Delete all of the user's notes. Use only when the user explicitly asks to delete them.",
+    inputSchema: z.object({}),
+  }),
 };
 
 export function runNoteTool(name: string, input: unknown, chatId: string) {
@@ -60,6 +71,8 @@ export function runNoteTool(name: string, input: unknown, chatId: string) {
       return saveNote(chatId, noteInput.parse(input).text);
     case 'searchNotes':
       return searchNotes(chatId, searchInput.parse(input).query);
+    case 'deleteNotes':
+      return deleteNotes(chatId);
     default:
       return undefined;
   }

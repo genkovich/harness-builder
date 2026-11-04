@@ -15,6 +15,9 @@ import { approxTokens, tracer, type RunInfo } from './trace.ts';
 // Шматок контексту з файла проєкту: тег, звідки взяли, текст.
 export type Section = { tag: string; source: string; text: string };
 
+// Рішення PreToolUse. rule = яке правило спрацювало, щоб у trace було видно причину.
+export type Decision = { allow: true; rule?: string } | { allow: false; rule?: string; reason: string };
+
 export type Limits = {
   maxTurns: number; // скільки разів максимум питаємо модель за одну задачу
   maxCostUsd: number; // бюджет однієї задачі
@@ -39,8 +42,12 @@ export type Agent = {
   // Файли проєкту, які харнес додає до system: каталог skills, з етапу 10 ще й AGENTS.md.
   context?: Section[];
   tools: ToolSet;
+  // Які тули бачить цей чат. Немає функції = усі тули для всіх.
+  toolsFor?: (chatId: string) => ToolSet;
   // Виконання тулів живе в нашому коді. Модель лише просить, а run каже, хто питає.
   runTool: (name: string, input: unknown, run: RunInfo) => Promise<JSONValue>;
+  // PreToolUse: перевірка перед кожним викликом тула, як хук у Claude Code. null = правил немає.
+  preToolUse?: (name: string, run: RunInfo) => Decision | null;
   limits?: Partial<Limits>;
 };
 
@@ -84,7 +91,8 @@ export async function runAgent(
   const trace = tracer(run);
   const limits = withDefaults(agent.limits);
   const system = systemOf(agent);
-  const tools = agent.tools;
+  // Список тулів залежить від того, хто питає. Вирішує код, до першого запиту.
+  const tools = agent.toolsFor?.(where.chatId) ?? agent.tools;
   // Памʼять розмови: спершу минулі повідомлення цього чату, нове повідомлення в кінці.
   const history = loadHistory(where.chatId);
   const kept = trimHistory(history);
@@ -231,6 +239,18 @@ async function executeTool(
   turn: number,
 ): Promise<JSONValue> {
   const base = { turn, id: call.toolCallId, name: call.toolName };
+  // PreToolUse стоїть першим, ще до схеми: виклик тула, якого немає в списку, теж сюди доходить.
+  const decision = agent.preToolUse?.(call.toolName, run) ?? null;
+  if (decision && !decision.allow) {
+    // Модель отримає цю відмову як результат свого виклику і пояснить її користувачу.
+    const denied = { error: `denied: ${decision.reason}` };
+    trace('pre_tool_use', { ...base, allow: false, rule: decision.rule ?? null, reason: decision.reason, result: denied });
+    return denied;
+  }
+  if (decision) {
+    trace('pre_tool_use', { ...base, allow: true, rule: decision.rule ?? null, reason: null });
+  }
+
   try {
     // Аргументи не пройшли схему: виконавцю такий виклик не передаємо.
     if (call.invalid) {

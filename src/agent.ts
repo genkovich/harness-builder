@@ -1,6 +1,7 @@
 import type { JSONValue } from 'ai';
 import type { Agent } from './harness.ts';
 import { loadModel } from './model.ts';
+import { preToolUse, toolsFor } from './permissions.ts';
 import { noteTools, runNoteTool } from './tools/notes.ts';
 import { runSkillTool, skillCatalog, skillTools } from './tools/skills.ts';
 
@@ -23,6 +24,8 @@ export function createAgent(): Agent {
     system,
     context: [skillCatalog()],
     tools,
+    // Шар 1: кожен чат отримує свій список тулів. deleteNotes бачить лише власник.
+    toolsFor: chatId => toolsFor(tools, chatId),
     async runTool(name, input, run) {
       const output = runSkillTool(name, input) ?? runNoteTool(name, input, run.chatId);
       if (output === undefined) {
@@ -30,6 +33,8 @@ export function createAgent(): Agent {
       }
       return output as JSONValue;
     },
+    // PreToolUse: правила DENY_TOOLS з .env і owner-only перевіряються перед кожним викликом.
+    preToolUse,
     limits: {
       maxTurns: Number(process.env.MAX_TURNS) || undefined,
       maxCostUsd: Number(process.env.MAX_COST_USD) || undefined,
