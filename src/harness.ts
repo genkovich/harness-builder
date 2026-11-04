@@ -8,6 +8,7 @@ import {
   type ToolSet,
   type TypedToolCall,
 } from 'ai';
+import { loadHistory, saveHistory, trimHistory } from './history.ts';
 import { costOf, type ModelInfo } from './model.ts';
 import { approxTokens, tracer, type RunInfo } from './trace.ts';
 
@@ -69,17 +70,26 @@ export async function runAgent(
   const limits = withDefaults(agent.limits);
   const system = agent.system;
   const tools = agent.tools;
+  // Памʼять розмови: спершу минулі повідомлення цього чату, нове повідомлення в кінці.
+  const history = loadHistory(where.chatId);
+  const kept = trimHistory(history);
   // Уся «памʼять» моделі = цей масив. Що в нього не поклали, того вона не бачить.
-  const messages: ModelMessage[] = [{ role: 'user', content: task }];
+  const messages: ModelMessage[] = [...kept.messages, { role: 'user', content: task }];
   let cost: number | null = agent.model.price ? 0 : null;
   let turn = 0;
 
   const stop = (reason: StopReason, text: string): RunResult => {
+    // Користувач бачив цей текст, тож і в історії він має бути. Фінальна відповідь моделі вже в messages.
+    if (reason !== 'final') {
+      messages.push({ role: 'assistant', content: text });
+    }
+    saveHistory(where.chatId, messages);
     trace('stop', { reason, text, turns: turn, costUsd: cost });
     return { runId: run.runId, reason, text, turns: turn, costUsd: cost, messages };
   };
 
   trace('start', { task, model: agent.model.id, limits });
+  trace('history', { loaded: history.length, kept: kept.messages.length, trimmed: kept.trimmed });
 
   try {
     while (turn < limits.maxTurns) {
